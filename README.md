@@ -2,23 +2,12 @@
 
 A proof-of-concept, tiny Linux userspace networking stack that can run inside Docker Desktop on macOS.
 
-It contains:
-
-- a TAP interface created inside the container
-- Ethernet frame parsing
-- ARP cache / ARP replies
-- IPv4 parsing
-- ICMP echo reply (ping responder)
-- a clean place to add UDP/TCP later
-
-It talks to a virtual NIC (TAP) instead of a physical NIC.
+It uses a TAP interface created inside the container to simulate a virtual NIC. It parses Ethernet frames, writes ARP (address resolution protocl) replies, parses IPv4 and generates ICMP echo replies. Adding a UDP/TCP stack can be done at later time.
 
 ## Prerequisites
 
 - Docker Desktop on macOS
 - `docker compose` working in your shell
-
-Docker Desktop includes Docker Engine, Docker CLI, and Docker Compose on Mac. `docker compose up` builds/recreates/starts the services in your compose file. 
 
 ## Quick start
 
