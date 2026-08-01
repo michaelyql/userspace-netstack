@@ -1,0 +1,13 @@
+services:
+  netstack:
+    build: .
+    container_name: userspace-net-stack
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    tty: true
+    stdin_open: true
+    command: ["/app/netstack", "--tap", "tap0", "--ip", "10.0.0.2/24", "--mac", "02:00:00:00:00:02"]
