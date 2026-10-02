@@ -1,0 +1,52 @@
+## notes
+
+- the program runs in userspace and avoids making any syscalls, hence bypassing the kernel
+- continuously polls the NIC and directly interacts with the NIC's tx and rx rings through memory-mapped registers
+- pins the polling thread to a cpu to prevent the OS from moving the thread and ensure the core is only used for packet processing, as well as guarantee stable performance
+- alternatives: linux NAPI instructs kernel itself to poll NIC hardware instead of interrupts, but it does not allow complete kernel bypass and the same performance 
+- key details: 
+    - no malloc, have to use custom memory management and preallocate buffers for NIC to write into
+    - batch processing: batch packets together instead of processing each packet one by one
+- DPDK uses `rte_eth_rx_burst()` (a userspace function) to poll a region of memory (initialized by the program) shared with the NIC
+    - specifically, it polls the Descriptor Done (`DD`) bit/flag inside the ring
+    - when a packet arrives, the NIC reads the descriptor at its head pointer to get the buffer's DMA address
+    - then it uses direct memory access (DMA) to write the packet contents to that address, then sets the DD bit to 1
+    - the NIC is configured using memory-mapped IO (MMIO) registers which tell it where the base of the descriptor ring (`RDBA` / base address) is and it's length (`RDLEN`)
+    - the receive descriptor head (`RDH`) is maintained and updated by the NIC itself
+    - the program writes to the tail (`RDT`) register. everything from the tail to the head is valid descriptor entries that the NIC can use 
+    - on processing a packet, the program zeros of the DD bit in that descriptor so that it can be reused by the NIC again
+    - to prevent the CPU from seeing `DD == 1` before the packet data has actually landed in memory, the DPDK driver inserts a read memory barrier (`rte_rmb()`) after reading the status field but before reading the rest of the descriptor
+    - the memory barrier can either be compiled into a hardware instruction (like `lfence` on x86, `dmb`/data memory barrier on ARM), or just prevent the compiler from reordering the packet buffer read before the DD status check 
+    - since the NIC DMA's into the buffer, we have to force the CPU to read from the memory location again rather than using a stale cached value
+- default linux packet processing behaviour
+    - packet arrives -> NIC raises hardware interrupt (hardIRQ) -> hardware interrupt handler runs, schedules a software interrupt (softIRQ) and disables further hardware interrupts from new packets -> kernel's softIRQ handler runs, calls the driver's `poll` to process the packets -> process batch of packets from NIC's ring buffer until packets are exhausted -> re-enable NIC's packet receive interrupts 
+    - note that it only disables the NIC's interrupts, not disabling the entire shared IRQ line
+- TUN/TAP interface
+    - TUN (tunnel) is layer 3 (network layer) point-to-point interface. it sends/receives IP datagrams. it tunnels IP packets. the kernel sees a point-to-point link
+    - TAP (network tap) is layer 2 (link layer) interface that receives full Ethernet frames with MAC headers. it behaves like a virtual ethernet port. VMs have their own virtual NIC and MAC address, and they can use the TAP interface to connect to virtual Ethernet switch (Linux bridge `br0`) and appear as a peer on the LAN
+    - the kernel treats it as any other hardware device 
+    - tap/tun interfaces (`tap0`, `tun0`) are each associated with a file descriptor, that a userspace program can read/write to. writing to the file descriptor simulates a hardware device receiving packets, which it sends to the kernel. 
+    - likewise the kernel sends packets that it wants to transmit to the interface, which is piped to the fd for the userspace program to process
+    - the tap/tun driver can do this because it implements the same interface contract a real NIC driver implements - `ndo_start_xmit()`, `netif_rx()` / `napi_gro_receive()`. a real driver talks to the hardware, the tun/tap driver talks to a file descriptor 
+    - TAP/TUN is really just a packet pipe
+- mac has `en0`, `en1` etc. network interfaces representing the built-in ethernet/wifi interfaces
+    - `networksetup -listallhardwareports` shows the hardware port, device and ethernet address
+    - "hardware port" helps distinguish between virtual interfaces (like `bridge0`) from external adapteres (e.g. USB to ethernet)
+    - you can then use the device name to get detailed info using `ifconfig <interface name>` e.g. `ifconfig en0`. it shows the IP address, MAC address, MTU, and other low-level specifics for that interface
+    - `bridge0` is a virtual interface that bridges multiple connections (e.g. wifi, thunderbolt) to a single logical network
+    - `lo0` is the loopback interface
+    - `utun` is used for VPN tunnels
+    - the interfaces `en0`, `en1` etc. are the kernel's handles for the NIC, not the hardware itself. when they arrive at the hardware, they get DMA'd into memory. the interface is where the driver *publishes* received packets into the network stack
+    - each packet is tagged with the interface that it was sent to
+    - `netstat -i` shows interface statistics (packets in/out, errors)
+    - `tcpdump` prints out a description of the contents of packets on a network interface that match the Boolean expression
+- maCOS
+    - in macOS, the NIC driver is a kernel extension (kext) or DriverKit extension (dext)
+    - a userspace program has no direct access to the hardware's DMA rings or descriptor memory
+    - macOS does not support `AF_PACKET` like linux; there is no standard userspace API to claim the NIC's hardware queues and receive raw packets directly into your own buffers
+    - the closest you can get is something like using berkeley packet filters (BPF) 
+- DPDK 
+    - DPDK has virtual poll mode drivers (PMD) e.g. `net_tap` (simulated NIC), `net_ring` (in-memory ring buffer), `net_pcap` etc. 
+    - from the application's view, it still looks like a DPDK ethernet device; it has rx and tx queues, and calling `rte_eth_rx_burst()` and the app calls `rte_eth_tx_burst()` to receive and send packets
+    - some virtual PMDs connect to a real network device, while others simply connect two DPDK endpoints
+    - for development and testing, you can create a DPDK virtual ethernet device, even if the machine has no physical NIC
